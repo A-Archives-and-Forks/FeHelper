@@ -35,7 +35,15 @@ new Vue({
         hideDemo: false,
         undergoing: false,
         messages: [],
-        showHistoryPanel: false
+        showHistoryPanel: false,
+        showSettings: false,
+        showApiKeyWarning: false,
+        settingsSaved: false,
+        aiProvider: 'siliconflow',
+        aiApiKey: '',
+        aiCustomUrl: '',
+        aiCustomModel: '',
+        providers: {}
     },
     computed: {
         groupedHistory() {
@@ -63,13 +71,22 @@ new Vue({
     mounted: function () {
         this.$refs.prompt.focus();
         this.hideDemo = !!(new URL(location.href)).searchParams.get('hideDemo');
-        // 加载本地历史
         const local = localStorage.getItem('fh-aiagent-history');
         if(local){
             try {
                 this.history = JSON.parse(local);
             } catch(e) {}
         }
+        this.providers = AI.PROVIDERS;
+        AI.getConfig().then(cfg => {
+            this.aiProvider = cfg.provider;
+            this.aiApiKey = cfg.apiKey;
+            this.aiCustomUrl = cfg.customUrl;
+            this.aiCustomModel = cfg.customModel;
+            if (!cfg.apiKey) {
+                this.showApiKeyWarning = true;
+            }
+        });
         this.loadPatchHotfix();
     },
     methods: {
@@ -187,7 +204,6 @@ new Vue({
                 }
                 let id = respJson.id;
                 let rawContent = respJson.content || '';
-                // 检查多轮代码补全场景
                 const lastAssistantMsg = this.currentSession.slice().reverse().find(m => m.role === 'assistant');
                 const lastIsCodeBlock = lastAssistantMsg && /```\s*$/.test(lastAssistantMsg.content.trim());
                 const thisIsCodeBlock = /^```/.test(rawContent.trim());
@@ -204,7 +220,6 @@ new Vue({
                     let dateTime = new Date(respJson.created * 1000);
                     let respTime = dateTime.format('yyyy/MM/dd HH:mm:ss');
                     this.respResult = { id,sendTime,message:prompt,respTime,respContent };
-                    // 新增：助手回复push到currentSession
                     this.currentSession.push({
                         role: 'assistant',
                         id,
@@ -213,12 +228,23 @@ new Vue({
                     });
                 }else{
                     this.respResult.respContent = respContent;
-                    // 更新最后一条助手消息内容
                     if(this.currentSession.length && this.currentSession[this.currentSession.length-1].role==='assistant'){
                         this.currentSession[this.currentSession.length-1].content = respContent;
                     }
                 }
                 this.$nextTick(() => this.scrollToBottom());
+            }).catch(err => {
+                this.undergoing = false;
+                if (err.message && err.message.startsWith('NO_API_KEY:')) {
+                    this.showApiKeyWarning = true;
+                    this.messages.pop();
+                    this.currentSession.pop();
+                } else {
+                    const errTime = (new Date()).format('yyyy/MM/dd HH:mm:ss');
+                    const errMsg = `<span class="resp-error">请求失败：${err.message}</span>`;
+                    this.currentSession.push({ role: 'assistant', id: 'err-' + Date.now(), time: errTime, content: errMsg });
+                    this.$nextTick(() => this.scrollToBottom());
+                }
             });            
         },
 
@@ -283,6 +309,20 @@ new Vue({
             this.showHistoryPanel = !this.showHistoryPanel;
         },
 
+        onProviderChange() {
+            this.aiApiKey = '';
+        },
+        async saveAiSettings() {
+            await AI.saveConfig({
+                provider: this.aiProvider,
+                apiKey: this.aiApiKey,
+                customUrl: this.aiCustomUrl,
+                customModel: this.aiCustomModel
+            });
+            this.settingsSaved = true;
+            this.showApiKeyWarning = false;
+            setTimeout(() => { this.settingsSaved = false; }, 2000);
+        },
         onPromptKeydown(e) {
             if (e.key === 'Enter') {
                 if (e.shiftKey) {

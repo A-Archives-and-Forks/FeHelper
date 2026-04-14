@@ -317,3 +317,122 @@ td.td-icon {
 td.td-content .x-xcontent.x-user-content {
     white-space: pre-wrap;
 }
+
+/* Settings Panel */
+.fh-settings-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.35);
+    z-index: 20000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.fh-settings-panel {
+    background: #fff;
+    border-radius: 12px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.18);
+    width: 460px;
+    max-width: 90vw;
+    overflow: hidden;
+}
+.fh-settings-header {
+    padding: 16px 20px;
+    font-size: 17px;
+    font-weight: 600;
+    border-bottom: 1px solid #eee;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+.fh-settings-close {
+    background: none;
+    border: none;
+    font-size: 18px;
+    color: #999;
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 4px;
+}
+.fh-settings-close:hover {
+    background: #f5f5f5;
+    color: #333;
+}
+.fh-settings-body {
+    padding: 20px;
+}
+.fh-settings-row {
+    margin-bottom: 16px;
+}
+.fh-settings-row label {
+    display: block;
+    font-size: 13px;
+    font-weight: 600;
+    color: #555;
+    margin-bottom: 6px;
+}
+.fh-settings-select,
+.fh-settings-input {
+    width: 100%;
+    padding: 8px 12px;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    font-size: 14px;
+    outline: none;
+    transition: border-color 0.2s;
+    box-sizing: border-box;
+}
+.fh-settings-select:focus,
+.fh-settings-input:focus {
+    border-color: #1976d2;
+}
+.fh-settings-hint {
+    background: #f0f7ff;
+    border-radius: 6px;
+    padding: 10px 14px;
+    font-size: 12px;
+    color: #555;
+    margin-bottom: 16px;
+    line-height: 1.6;
+}
+.fh-settings-hint a {
+    color: #1976d2;
+}
+.fh-settings-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 8px;
+}
+.fh-settings-saved {
+    color: #43a047;
+    font-size: 14px;
+    font-weight: 500;
+}
+
+/* API Key Warning */
+.fh-apikey-warning {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.2);
+    z-index: 15000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.fh-apikey-warning-inner {
+    background: #fff;
+    border-radius: 12px;
+    padding: 28px 32px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.12);
+    text-align: center;
+    max-width: 400px;
+}
+.fh-apikey-warning-inner p {
+    margin: 0 0 12px;
+    font-size: 15px;
+    line-height: 1.6;
+}
+.fh-apikey-warning-inner a {
+    color: #1976d2;
+}
