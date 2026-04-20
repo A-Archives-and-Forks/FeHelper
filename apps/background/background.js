@@ -228,17 +228,32 @@ let BgPageInstance = (function () {
                     }
                 }
 
+                // 跨 tab 传递内容时不要再依赖 SW 内存，改写到 chrome.storage.session，
+                // 这样即使 SW 被销毁，工具页面也能取到原始内容。
+                let _saveContentForTab = (tabId) => {
+                    try {
+                        let key = `fh-content-${tabId}`;
+                        if (chrome.storage && chrome.storage.session) {
+                            chrome.storage.session.set({[key]: {content: withContent}}).catch(() => {});
+                        } else {
+                            FeJson[tabId] = {content: withContent};
+                        }
+                    } catch (_) {
+                        FeJson[tabId] = {content: withContent};
+                    }
+                };
+
                 if (!isOpened) {
                     let url = `/${tool}/index.html` + (query ? "?" + query : '');
                     chrome.tabs.create({
                         url,
                         active: true
                     }).then(tab => {
-                        FeJson[tab.id] = { content: withContent };
+                        _saveContentForTab(tab.id);
                     }).catch(() => {});
                 } else {
                     chrome.tabs.update(tabId, {highlighted: true}).then(tab => {
-                        FeJson[tab.id] = { content: withContent };
+                        _saveContentForTab(tabId);
                         chrome.tabs.reload(tabId);
                     }).catch(() => {});
                 }
@@ -544,10 +559,10 @@ let BgPageInstance = (function () {
                     case 'qr-decode':
                         handleQrDecode(request.params.uri);
                         break;
-                    // 请求页面内容数据
+                    // 请求页面内容数据（异步从 storage.session 读取）
                     case 'request-page-content':
-                        handleRequestPageContent(request);
-                        break;
+                        handleRequestPageContent(request, callback);
+                        return true;
                     // 设置页面性能时序数据
                     case 'set-page-timing-data':
                         handleSetPageTimingData(request.wpoInfo);
@@ -579,6 +594,29 @@ let BgPageInstance = (function () {
                             url: sender && sender.tab && sender.tab.url
                         }, request.params || {}));
                         break;
+                    // 油猴 @require 远程脚本代理 fetch（绕过页面 CSP/CORS）
+                    // 安全：只允许 fetch 已启用脚本声明过的 @require URL，避免任意页面利用桥做 SSRF。
+                    case 'page-monkey-require-fetch': {
+                        let url = (request.params && request.params.url) || '';
+                        if (!url) {
+                            callback && callback({ok: false, err: 'empty url'});
+                            return true;
+                        }
+                        Monkey.isAllowedRequireUrl(url).then(allowed => {
+                            if (!allowed) {
+                                callback && callback({ok: false, err: 'url not in any enabled @require whitelist'});
+                                return;
+                            }
+                            fetch(url, {credentials: 'omit'})
+                                .then(r => {
+                                    if (!r.ok) throw new Error('HTTP ' + r.status);
+                                    return r.text();
+                                })
+                                .then(text => callback && callback({ok: true, text: text}))
+                                .catch(err => callback && callback({ok: false, err: String(err && err.message || err)}));
+                        });
+                        return true;
+                    }
                     // 注入内容脚本CSS样式
                     case 'inject-content-css':
                         _injectContentCss(sender.tab.id,request.tool,!!request.devTool);
@@ -836,10 +874,27 @@ let BgPageInstance = (function () {
         Statistics.recordToolUsage('qr-code');
     }
 
-    // 处理页面内容请求
-    function handleRequestPageContent(request) {
-        request.params = FeJson[request.tabId];
-        delete FeJson[request.tabId];
+    // 处理页面内容请求：优先从 chrome.storage.session 读取（SW 重启后仍可用），
+    // 兼容老路径：如果 storage 里没有，再回退到内存中的 FeJson。
+    function handleRequestPageContent(request, callback) {
+        let tabId = request.tabId;
+        let key = `fh-content-${tabId}`;
+        let memHit = FeJson[tabId];
+        if (memHit) delete FeJson[tabId];
+
+        if (chrome.storage && chrome.storage.session) {
+            chrome.storage.session.get(key).then(items => {
+                let payload = (items && items[key]) || memHit || null;
+                try {
+                    if (items && items[key]) chrome.storage.session.remove(key).catch(() => {});
+                } catch (_) {}
+                callback && callback(payload);
+            }).catch(() => {
+                callback && callback(memHit || null);
+            });
+        } else {
+            callback && callback(memHit || null);
+        }
     }
 
     // 处理页面性能数据设置
@@ -888,13 +943,20 @@ let BgPageInstance = (function () {
 
     // 获取热修复脚本，代理请求 hotfix.json，解决CORS问题
     function fetchHotfixJson(callback) {
-        fetch('https://fehelper.com/static/js/hotfix.json?v=' + Date.now())
-            .then(response => response.text())
+        let url = 'https://fehelper.com/static/js/hotfix.json?v=' + Date.now();
+        fetch(url)
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                return response.text();
+            })
             .then(scriptContent => {
                 callback && callback({ success: true, content: scriptContent });
             })
             .catch(error => {
-                callback && callback({ success: false, error: error.message });
+                console.warn('[FeHelper] hotfix.json 获取失败:', url, error && error.message);
+                callback && callback({ success: false, error: (error && error.message) || String(error) });
             });
     }
 
@@ -962,7 +1024,8 @@ let BgPageInstance = (function () {
                 }
             })
             .catch(e => {
-                callback && callback({ success: false, error: '没有需要修复的补丁' });
+                console.warn('[FeHelper] 热修复补丁获取失败:', patchUrl, e && e.message);
+                callback && callback({ success: false, error: (e && e.message) || '没有需要修复的补丁' });
             });
     }
 

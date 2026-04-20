@@ -160,26 +160,7 @@ const buildFinalCode = (monkey) => {
                 try { console.error('[FH-Monkey:' + ${nameStr} + ']', e); } catch(_) {}
             };
 
-            // hook console.error / console.warn，自动汇总到运行日志面板
-            try {
-                ['error', 'warn'].forEach(function(level){
-                    var orig = console[level];
-                    console[level] = function(){
-                        var args = [].slice.call(arguments);
-                        var text = args.map(function(a){
-                            try {
-                                if (a && a.stack) return a.stack;
-                                if (typeof a === 'object') return JSON.stringify(a);
-                                return String(a);
-                            } catch(_) { return String(a); }
-                        }).join(' ');
-                        __post(level, text);
-                        try { orig.apply(console, args); } catch(_) {}
-                    };
-                });
-            } catch(_) {}
-
-            // 让 GM_log 也回流到运行日志面板
+            // 让 GM_log 也回流到运行日志面板（每个脚本作用域独立闭包，必须每次都 hook）
             try {
                 if (typeof GM_log === 'function') {
                     var __origGmLog = GM_log;
@@ -196,15 +177,46 @@ const buildFinalCode = (monkey) => {
                 }
             } catch(_) {}
 
-            // 全局 unhandled error / promise rejection
+            // 全局 console / error / unhandledrejection 监听只挂一次（避免多脚本 N 倍重复 + 归属错乱），
+            // 由全局 sentinel 控制；归属为通用 'page-monkey'，具体脚本错误请用 try-catch 自行 GM_log。
             try {
-                window.addEventListener('error', function(e){
-                    __post('error', (e && (e.message || (e.error && e.error.stack))) || 'window.onerror');
-                });
-                window.addEventListener('unhandledrejection', function(e){
-                    var r = e && e.reason;
-                    __post('error', 'UnhandledRejection: ' + ((r && r.stack) || r));
-                });
+                if (!window.__fhMonkeyGlobalHooked) {
+                    window.__fhMonkeyGlobalHooked = true;
+                    var __postGlobal = function(level, msg){
+                        try {
+                            window.postMessage({
+                                __fh_monkey_log: true,
+                                payload: {
+                                    id: '__global__', name: 'page-monkey',
+                                    level: level, msg: String((msg && msg.stack) || msg),
+                                    url: location.href, time: Date.now()
+                                }
+                            }, '*');
+                        } catch(_) {}
+                    };
+                    ['error', 'warn'].forEach(function(level){
+                        var orig = console[level];
+                        console[level] = function(){
+                            var args = [].slice.call(arguments);
+                            var text = args.map(function(a){
+                                try {
+                                    if (a && a.stack) return a.stack;
+                                    if (typeof a === 'object') return JSON.stringify(a);
+                                    return String(a);
+                                } catch(_) { return String(a); }
+                            }).join(' ');
+                            __postGlobal(level, text);
+                            try { orig.apply(console, args); } catch(_) {}
+                        };
+                    });
+                    window.addEventListener('error', function(e){
+                        __postGlobal('error', (e && (e.message || (e.error && e.error.stack))) || 'window.onerror');
+                    });
+                    window.addEventListener('unhandledrejection', function(e){
+                        var r = e && e.reason;
+                        __postGlobal('error', 'UnhandledRejection: ' + ((r && r.stack) || r));
+                    });
+                }
             } catch(_) {}
 
             var __runUser = function(){
@@ -217,15 +229,51 @@ const buildFinalCode = (monkey) => {
                 ${refresh > 0 ? `try{ setTimeout(function(){ try{ location.reload(); }catch(e){} }, ${refresh * 1000}); }catch(e){}` : ''}
             };
             var __requires = ${JSON.stringify(requires)};
+            // 通过 ISOLATED 桥 + background 代理 fetch @require 脚本，
+            // 这样可以绕过页面 CSP / CORS 限制（MAIN world 直接 fetch 经常被 CSP block）。
+            var __fetchRequire = function(url){
+                return new Promise(function(resolve){
+                    var reqId = 'req_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+                    var timer = setTimeout(function(){
+                        window.removeEventListener('message', onMsg, false);
+                        resolve({ok:false, err:'require timeout'});
+                    }, 15000);
+                    function onMsg(e){
+                        if (!e || !e.data || e.data.__fh_monkey_require_resp !== true) return;
+                        if (e.data.reqId !== reqId) return;
+                        clearTimeout(timer);
+                        window.removeEventListener('message', onMsg, false);
+                        resolve(e.data);
+                    }
+                    window.addEventListener('message', onMsg, false);
+                    try {
+                        window.postMessage({__fh_monkey_require: true, reqId: reqId, url: url}, '*');
+                    } catch (err) {
+                        clearTimeout(timer);
+                        window.removeEventListener('message', onMsg, false);
+                        resolve({ok:false, err:String(err && err.message || err)});
+                    }
+                });
+            };
             if (__requires.length) {
                 Promise.all(__requires.map(function(u){
-                    return fetch(u).then(function(r){ return r.text(); }).then(function(t){
-                        try { (0, eval)(t); } catch(e) {
-                            var s = document.createElement('script');
-                            s.textContent = t;
-                            (document.head || document.documentElement).appendChild(s);
+                    return __fetchRequire(u).then(function(r){
+                        if (!r || !r.ok) {
+                            __reportError('require failed: ' + u + ' / ' + (r && r.err));
+                            return;
                         }
-                    }).catch(function(e){ __reportError('require failed: ' + u + ' / ' + e); });
+                        var t = r.text || '';
+                        try { (0, eval)(t); } catch(e) {
+                            try {
+                                var s = document.createElement('script');
+                                s.textContent = t;
+                                (document.head || document.documentElement).appendChild(s);
+                                s.remove();
+                            } catch (e2) {
+                                __reportError('require eval failed: ' + u + ' / ' + e2);
+                            }
+                        }
+                    });
                 })).then(__runUser).catch(__runUser);
             } else {
                 __runUser();
@@ -246,28 +294,66 @@ const _injectCss = (tabId, allFrames, css) => {
 
 // MAIN world 没有 chrome.runtime，需要在 ISOLATED world 中常驻一个桥接监听器，
 // 通过 window.postMessage 接收 MAIN world 抛出的日志，再转发到 background。
+// 返回 Promise，调用方需 await 以保证桥接器在 user script 之前就位（否则启动期日志会丢）。
 const _injectLogBridge = (tabId, allFrames) => {
     try {
-        chrome.scripting.executeScript({
+        return chrome.scripting.executeScript({
             target: { tabId, allFrames },
             func: function () {
                 if (window.__fhMonkeyBridgeReady) return;
                 window.__fhMonkeyBridgeReady = true;
                 window.addEventListener('message', function (e) {
-                    if (!e || !e.data || e.data.__fh_monkey_log !== true) return;
-                    try {
-                        chrome.runtime.sendMessage({
-                            type: 'fh-dynamic-any-thing',
-                            thing: 'page-monkey-log',
-                            params: e.data.payload || {}
-                        });
-                    } catch (_) {}
+                    if (!e || !e.data) return;
+                    var d = e.data;
+                    // 1) 日志桥
+                    if (d.__fh_monkey_log === true) {
+                        try {
+                            chrome.runtime.sendMessage({
+                                type: 'fh-dynamic-any-thing',
+                                thing: 'page-monkey-log',
+                                params: d.payload || {}
+                            });
+                        } catch (_) {}
+                        return;
+                    }
+                    // 2) @require 代理：通过 background fetch 远程脚本，
+                    //    避免页面 CSP/CORS 限制 MAIN world 直接 fetch
+                    if (d.__fh_monkey_require === true && d.url && d.reqId) {
+                        var reqId = d.reqId, url = d.url;
+                        try {
+                            chrome.runtime.sendMessage({
+                                type: 'fh-dynamic-any-thing',
+                                thing: 'page-monkey-require-fetch',
+                                params: { url: url }
+                            }, function (resp) {
+                                try {
+                                    window.postMessage({
+                                        __fh_monkey_require_resp: true,
+                                        reqId: reqId,
+                                        ok: !!(resp && resp.ok),
+                                        text: (resp && resp.text) || '',
+                                        err: (resp && resp.err) || ''
+                                    }, '*');
+                                } catch (_) {}
+                            });
+                        } catch (err) {
+                            try {
+                                window.postMessage({
+                                    __fh_monkey_require_resp: true,
+                                    reqId: reqId, ok: false, text: '',
+                                    err: String(err && err.message || err)
+                                }, '*');
+                            } catch (_) {}
+                        }
+                    }
                 }, false);
             },
             world: 'ISOLATED',
             injectImmediately: true
         }).catch(() => {});
-    } catch (_) {}
+    } catch (_) {
+        return Promise.resolve();
+    }
 };
 
 const _injectScript = (tabId, monkey) => {
@@ -275,9 +361,10 @@ const _injectScript = (tabId, monkey) => {
     let world = monkey.mWorld === 'ISOLATED' ? 'ISOLATED' : 'MAIN';
     let finalCode = buildFinalCode(monkey);
 
-    // 先确保 ISOLATED 桥接器在位（MAIN/ISOLATED 模式都需要：
-    // ISOLATED 模式下 user script 也通过 postMessage 走桥接，统一通道）
-    _injectLogBridge(tabId, allFrames);
+    // 必须先等 ISOLATED 桥接器就位（MAIN/ISOLATED 模式都需要：
+    // ISOLATED 模式下 user script 也通过 postMessage 走桥接，统一通道）。
+    // 否则 user script 启动期的早期日志/@require 请求会丢失。
+    let bridgeReady = _injectLogBridge(tabId, allFrames) || Promise.resolve();
 
     const exec = (worldOption, isFallback) => {
         try {
@@ -313,7 +400,7 @@ const _injectScript = (tabId, monkey) => {
             if (!isFallback && worldOption === 'MAIN') exec('ISOLATED', true);
         }
     };
-    exec(world, false);
+    bridgeReady.then(() => exec(world, false), () => exec(world, false));
 };
 
 const injectMonkey = (tabId, monkey) => {
@@ -395,4 +482,27 @@ const log = (params) => {
     });
 };
 
-export default { start, log, migrateMonkey, isMatch, matchOnePattern };
+/* ================== @require 白名单校验 ================== */
+// 桥接器代理 fetch 容易被恶意页面滥用做任意 URL 代理（绕过 CORS），
+// 因此 background 端必须校验 URL 必须出现在某个已启用脚本的 mRequireJs 列表中。
+const isAllowedRequireUrl = (url) => {
+    return new Promise(resolve => {
+        if (!url || typeof url !== 'string') return resolve(false);
+        try {
+            chrome.storage.local.get(PAGE_MONKEY_LOCAL_STORAGE_KEY, resps => {
+                let raw = resps && resps[PAGE_MONKEY_LOCAL_STORAGE_KEY];
+                if (!raw) return resolve(false);
+                let monkeys = [];
+                try { monkeys = JSON.parse(raw); } catch (e) {}
+                let allowed = monkeys.some(cm => {
+                    if (!cm || cm.mDisabled) return false;
+                    let list = (cm.mRequireJs || '').split(/[\s,，]+/).map(s => s.trim()).filter(Boolean);
+                    return list.indexOf(url) !== -1;
+                });
+                resolve(allowed);
+            });
+        } catch (_) { resolve(false); }
+    });
+};
+
+export default { start, log, migrateMonkey, isMatch, matchOnePattern, isAllowedRequireUrl };

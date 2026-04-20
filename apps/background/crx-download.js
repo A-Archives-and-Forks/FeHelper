@@ -69,35 +69,38 @@ export default (function () {
      * @param crxName 扩展名称
      * @param callback 下载动作结束后的回调
      */
+    // 触发实际下载（必须保证此时已拿到 downloads 权限）
+    let _doDownload = function (url, crxName, crxId) {
+        chrome.downloads.download({
+            url: url,
+            filename: crxName || crxId,
+            conflictAction: 'overwrite',
+            saveAs: true
+        }, function (downloadId) {
+            if (chrome.runtime.lastError) {
+                notifyText('抱歉，下载失败！错误信息：' + chrome.runtime.lastError.message);
+            }
+        });
+    };
+
     let downloadCrxFileByCrxId = function (crxId, crxName, callback) {
         detectGoogleDotCom(() => {
-            // google可以正常访问，则正常下载
             let url = "https://clients2.google.com/service/update2/crx?response=redirect&acceptformat=crx2,crx3&x=id%3D"
                 + crxId + "%26uc&prodversion=" + navigator.userAgent.split("Chrome/")[1].split(" ")[0];
-            if (!chrome.downloads) {
-                let a = document.createElement('a');
-                a.href = url;
-                a.download = crxName || (crxId + '.crx');
-                (document.body || document.documentElement).appendChild(a);
-                a.click();
-                a.remove();
+            // MV3 Service Worker 没有 document，必须走 chrome.downloads。
+            // 注意：chrome.permissions.request 在 SW 中不可用且 detectGoogleDotCom 已消耗用户手势，
+            // 所以未授权时直接 fallback：用 chrome.tabs.create 让浏览器原生下载流程接管。
+            if (chrome.downloads && typeof chrome.downloads.download === 'function') {
+                _doDownload(url, crxName, crxId);
             } else {
-                chrome.downloads.download({
-                    url: url,
-                    filename: crxName || crxId,
-                    conflictAction: 'overwrite',
-                    saveAs: true
-                }, function (downloadId) {
-                    if (chrome.runtime.lastError) {
-                        notifyText('抱歉，下载失败！错误信息：' + chrome.runtime.lastError.message);
-                    }
-                });
+                notifyText('未启用下载权限，已用浏览器原生方式打开下载链接，可在 FeHelper 设置中授予“下载”权限以获得更好体验。');
+                try {
+                    chrome.tabs.create({url: url, active: true});
+                } catch (_) {}
             }
         }, () => {
-            // google不能正常访问
             callback ? callback() : notifyText('抱歉，下载失败！');
         });
-
     };
 
     /**

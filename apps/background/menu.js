@@ -85,23 +85,33 @@ export default (function () {
                         });
                     };
                     toolMap[tool].menuConfig[1].onClick = function (info, tab) {
+                        // 先确保 qr-code 的 content-script.js 已注入到当前页面（ISOLATED world，
+                        // 因为它需要 chrome.runtime.sendMessage 上报解码结果），再触发解码逻辑，
+                        // 避免 SW 重启或新标签页里 window.qrcodeContentScript 未就绪。
                         chrome.scripting.executeScript({
-                            target: {tabId:tab.id,allFrames:false},
-                            args: [info.srcUrl || ''],
-                            func: (text) => {
-                                try {
-                                    if (typeof window.qrcodeContentScript === 'function') {
-                                        let qrcode = window.qrcodeContentScript();
-                                        if (typeof qrcode.decode === 'function') {
-                                            qrcode.decode(text);
-                                            return 1;
+                            target: {tabId: tab.id, allFrames: false},
+                            files: ['qr-code/content-script.js'],
+                            injectImmediately: true
+                        }).then(() => {
+                            chrome.scripting.executeScript({
+                                target: {tabId: tab.id, allFrames: false},
+                                args: [info.srcUrl || ''],
+                                func: (text) => {
+                                    try {
+                                        if (typeof window.qrcodeContentScript === 'function') {
+                                            let qrcode = window.qrcodeContentScript();
+                                            if (typeof qrcode.decode === 'function') {
+                                                qrcode.decode(text);
+                                                return 1;
+                                            }
                                         }
+                                        return 0;
+                                    } catch (e) {
+                                        return 0;
                                     }
-                                } catch (e) {
-                                    return 0;
                                 }
-                            }
-                        });
+                            }).catch(() => {});
+                        }).catch(() => {});
                     };
                     break;
 
