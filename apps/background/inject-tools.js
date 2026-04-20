@@ -3,17 +3,19 @@ import Settings from '../options/settings.js';
 export default (() => {
 
     let _execFunc = (tabId, allFrames, codeConfig, callback) => {
-        chrome.scripting.executeScript({
+        let opts = {
             target: {tabId, allFrames},
             func: codeConfig.func,
             args: codeConfig.args || []
-        }, function () {
+        };
+        if (codeConfig.world) opts.world = codeConfig.world;
+        chrome.scripting.executeScript(opts, function () {
             callback && callback.apply(this, arguments);
         });
     };
 
-    let _execJs = (tabId, allFrames, js, callback) => {
-        chrome.scripting.executeScript({
+    let _execJs = (tabId, allFrames, js, callback, world) => {
+        let opts = {
             target: {tabId, allFrames},
             func: function(code){
                 try {
@@ -21,7 +23,9 @@ export default (() => {
                 } catch (e) {}
             },
             args: [js]
-        }, function () {
+        };
+        if (world) opts.world = world;
+        chrome.scripting.executeScript(opts, function () {
             callback && callback.apply(this, arguments);
         });
     };
@@ -66,7 +70,7 @@ export default (() => {
                                 if (codeConfig.func) {
                                     _execFunc(tabId, af, codeConfig, callback);
                                 } else if (codeConfig.js) {
-                                    _execJs(tabId, af, 'try{' + codeConfig.js + ';}catch(e){};', callback);
+                                    _execJs(tabId, af, 'try{' + codeConfig.js + ';}catch(e){};', callback, codeConfig.world);
                                 } else {
                                     callback && callback.apply(this, arguments);
                                 }
@@ -82,7 +86,7 @@ export default (() => {
                     } else if (codeConfig.func) {
                         _execFunc(tabId, af, codeConfig, callback);
                     } else if (codeConfig.js) {
-                        _execJs(tabId, af, 'try{' + codeConfig.js + ';}catch(e){};', callback);
+                        _execJs(tabId, af, 'try{' + codeConfig.js + ';}catch(e){};', callback, codeConfig.world);
                     }
 
                 });

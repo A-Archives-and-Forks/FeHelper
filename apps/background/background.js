@@ -568,9 +568,16 @@ let BgPageInstance = (function () {
                     case 'page-screenshot-done':
                         _showScreenShotResult(request.params);
                         break;
-                    // 启动页面脚本注入（油猴功能）
+                    // 启动页面脚本注入（油猴功能 - 兼容老 content-script 调用）
                     case 'request-monkey-start':
-                        Monkey.start(request.params);
+                        Monkey.start(Object.assign({runAt: 'document-end'}, request.params || {}));
+                        break;
+                    // 页面油猴脚本回传日志
+                    case 'page-monkey-log':
+                        Monkey.log(Object.assign({
+                            tabId: sender && sender.tab && sender.tab.id,
+                            url: sender && sender.tab && sender.tab.url
+                        }, request.params || {}));
                         break;
                     // 注入内容脚本CSS样式
                     case 'inject-content-css':
@@ -635,6 +642,37 @@ let BgPageInstance = (function () {
                 }
             }
         });
+
+        // ============ 网页油猴：webNavigation 三档触发 ============
+        const _isMonkeyTriggerableUrl = (url) => /^(http(s)?|file):\/\//.test(url || '') && blacklist.every(reg => !reg.test(url));
+
+        try {
+            // document-start：DOM 还未构建，最早期 hook
+            chrome.webNavigation.onCommitted.addListener((details) => {
+                if (!_isMonkeyTriggerableUrl(details.url)) return;
+                Monkey.start({ tabId: details.tabId, frameId: details.frameId, url: details.url, runAt: 'document-start' });
+            });
+
+            // document-end：DOM 构建完成
+            chrome.webNavigation.onDOMContentLoaded.addListener((details) => {
+                if (!_isMonkeyTriggerableUrl(details.url)) return;
+                Monkey.start({ tabId: details.tabId, frameId: details.frameId, url: details.url, runAt: 'document-end' });
+            });
+
+            // document-idle：所有资源加载完
+            chrome.webNavigation.onCompleted.addListener((details) => {
+                if (!_isMonkeyTriggerableUrl(details.url)) return;
+                Monkey.start({ tabId: details.tabId, frameId: details.frameId, url: details.url, runAt: 'document-idle' });
+            });
+
+            // SPA 路由变化（pushState / replaceState）
+            chrome.webNavigation.onHistoryStateUpdated.addListener((details) => {
+                if (!_isMonkeyTriggerableUrl(details.url)) return;
+                Monkey.start({ tabId: details.tabId, frameId: details.frameId, url: details.url, runAt: 'document-end' });
+            });
+        } catch (e) {
+            console.warn('webNavigation listeners 注册失败：', e);
+        }
 
         // 安装与更新
         chrome.runtime.onInstalled.addListener(({reason, previousVersion}) => {
