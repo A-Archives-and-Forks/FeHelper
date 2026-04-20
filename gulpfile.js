@@ -31,6 +31,57 @@ const FIREFOX_REMOVE_TOOLS = [
     'grid-ruler', 'naotu', 'screenshot', 'page-monkey', 'excel2json'
 ];
 
+// ============================================================================
+// 浏览器差异化补丁：基础以 apps/manifest.json 为准（默认 Chrome MV3 形态），
+// 不同浏览器只在这里做最小化调整，后续维护只需改一个 manifest.json 即可。
+// ============================================================================
+const BROWSER_PATCHES = {
+    chrome(manifest) {
+        // Chrome 商店需要 update_url（webstore 自更新）
+        manifest.update_url = 'https://clients2.google.com/service/update2/crx';
+        return manifest;
+    },
+    edge(manifest) {
+        // Edge 商店不需要 update_url
+        delete manifest.update_url;
+        return manifest;
+    },
+    firefox(manifest) {
+        delete manifest.update_url;
+        // Firefox 不支持 chrome.alarms（部分版本支持，去掉更稳）
+        manifest.permissions = (manifest.permissions || []).filter(p => p !== 'alarms' && p !== 'webNavigation');
+        // Firefox MV3 后台脚本走 scripts 而非 service_worker
+        if (manifest.background && manifest.background.service_worker) {
+            manifest.background = {
+                scripts: [manifest.background.service_worker],
+                type: manifest.background.type || 'module'
+            };
+        }
+        // 必须的 gecko 扩展元信息
+        manifest.browser_specific_settings = {
+            gecko: {
+                id: 'firefox@fehelper.com',
+                strict_min_version: '109.0'
+            }
+        };
+        // Firefox CSP 需要 wasm-unsafe-eval / worker-src / connect-src 列表
+        manifest.content_security_policy = {
+            extension_pages: "script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; object-src 'self'; connect-src 'self' blob: https://chrome.fehelper.com https://api.siliconflow.cn https://baidufe.com https://www.baidufe.com https://img.shields.io;"
+        };
+        return manifest;
+    }
+};
+
+// 基于唯一的 apps/manifest.json 生成目标浏览器的 manifest 并写入 outputDir
+function buildManifest(browser, outputDir) {
+    const srcPath = path.resolve('apps/manifest.json');
+    const base = JSON.parse(fs.readFileSync(srcPath, 'utf-8'));
+    const patcher = BROWSER_PATCHES[browser];
+    if (!patcher) throw new Error(`Unknown browser target: ${browser}`);
+    const finalManifest = patcher(base);
+    fs.writeFileSync(path.join(outputDir, 'manifest.json'), JSON.stringify(finalManifest));
+}
+
 // 清理输出目录
 function cleanOutput(outputDir = 'output-chrome') {
     return gulp.src(outputDir, {read: false, allowEmpty: true}).pipe(clean({force: true}));
@@ -131,7 +182,7 @@ function compressImages(outputDir = 'output-chrome/apps') {
 // 清理冗余文件，并且打包成zip，发布到chrome webstore
 function zipPackage(outputRoot = 'output-chrome', cb) {
     let pathOfMF = path.join(outputRoot, 'apps/manifest.json');
-    let manifest = require(path.resolve(pathOfMF));
+    let manifest = JSON.parse(fs.readFileSync(pathOfMF, 'utf-8'));
     manifest.name = manifest.name.replace('-Dev', '');
     fs.writeFileSync(pathOfMF, JSON.stringify(manifest));
     let pkgName = 'fehelper.zip';
@@ -340,11 +391,8 @@ function detectUnusedFiles(outputDir = 'output-chrome/apps', cb) {
 
 // Firefox前置处理
 function firefoxPreprocess(cb) {
-    const srcDir = 'apps';
     const destDir = 'output-firefox/apps';
-    shell.exec(`mv ${destDir}/firefox.json ${destDir}/manifest.json`);
-    shell.exec(`rm -rf ${destDir}/chrome.json`);
-    shell.exec(`rm -rf ${destDir}/edge.json`);
+    buildManifest('firefox', destDir);
 
     FIREFOX_REMOVE_TOOLS.forEach(tool => {
         const toolDir = path.join(destDir, tool);
@@ -359,20 +407,14 @@ function firefoxPreprocess(cb) {
 // chrome前置处理
 function chromePreprocess(cb) {
     const destDir = 'output-chrome/apps';
-    shell.exec(`mv ${destDir}/chrome.json ${destDir}/manifest.json`);
-    shell.exec(`rm -rf ${destDir}/firefox.json`);
-    shell.exec(`rm -rf ${destDir}/edge.json`);
-
+    buildManifest('chrome', destDir);
     cb();
 }
 
 // edge前置处理
 function edgePreprocess(cb) {
     const destDir = 'output-edge/apps';
-    shell.exec(`mv ${destDir}/edge.json ${destDir}/manifest.json`);
-    shell.exec(`rm -rf ${destDir}/chrome.json`);
-    shell.exec(`rm -rf ${destDir}/firefox.json`);
-
+    buildManifest('edge', destDir);
     cb();
 }
 

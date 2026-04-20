@@ -133,20 +133,82 @@ const buildFinalCode = (monkey) => {
     let nameStr = JSON.stringify(monkey.mName || '');
     let idStr = JSON.stringify(monkey.id);
 
+    // 注意：MAIN world 没有 chrome.runtime API，所以日志一律走
+    // window.postMessage('FH_MONKEY_LOG' channel)，由 ISOLATED world
+    // 桥接器（_injectLogBridge）转发到 background。
     return `
         (function(){
             ${buildGmApi(monkey)}
-            var __reportError = function(e){
+
+            var __post = function(level, msg){
                 try {
-                    chrome.runtime && chrome.runtime.sendMessage && chrome.runtime.sendMessage({
-                        type: 'fh-dynamic-any-thing',
-                        thing: 'page-monkey-log',
-                        params: { id: ${idStr}, name: ${nameStr}, level: 'error', msg: String((e && e.stack) || e), url: location.href, time: Date.now() }
-                    });
+                    window.postMessage({
+                        __fh_monkey_log: true,
+                        payload: {
+                            id: ${idStr},
+                            name: ${nameStr},
+                            level: level,
+                            msg: String((msg && msg.stack) || msg),
+                            url: location.href,
+                            time: Date.now()
+                        }
+                    }, '*');
                 } catch(_) {}
+            };
+            var __reportError = function(e){
+                __post('error', e);
                 try { console.error('[FH-Monkey:' + ${nameStr} + ']', e); } catch(_) {}
             };
+
+            // hook console.error / console.warn，自动汇总到运行日志面板
+            try {
+                ['error', 'warn'].forEach(function(level){
+                    var orig = console[level];
+                    console[level] = function(){
+                        var args = [].slice.call(arguments);
+                        var text = args.map(function(a){
+                            try {
+                                if (a && a.stack) return a.stack;
+                                if (typeof a === 'object') return JSON.stringify(a);
+                                return String(a);
+                            } catch(_) { return String(a); }
+                        }).join(' ');
+                        __post(level, text);
+                        try { orig.apply(console, args); } catch(_) {}
+                    };
+                });
+            } catch(_) {}
+
+            // 让 GM_log 也回流到运行日志面板
+            try {
+                if (typeof GM_log === 'function') {
+                    var __origGmLog = GM_log;
+                    GM_log = function(){
+                        try {
+                            var args = [].slice.call(arguments);
+                            var text = args.map(function(a){
+                                try { return typeof a === 'object' ? JSON.stringify(a) : String(a); } catch(_) { return String(a); }
+                            }).join(' ');
+                            __post('info', text);
+                        } catch(_) {}
+                        try { return __origGmLog.apply(null, arguments); } catch(_) {}
+                    };
+                }
+            } catch(_) {}
+
+            // 全局 unhandled error / promise rejection
+            try {
+                window.addEventListener('error', function(e){
+                    __post('error', (e && (e.message || (e.error && e.error.stack))) || 'window.onerror');
+                });
+                window.addEventListener('unhandledrejection', function(e){
+                    var r = e && e.reason;
+                    __post('error', 'UnhandledRejection: ' + ((r && r.stack) || r));
+                });
+            } catch(_) {}
+
             var __runUser = function(){
+                __post('info', '脚本开始执行');
                 try {
                     (function(){
                         ${userScript}
@@ -182,10 +244,40 @@ const _injectCss = (tabId, allFrames, css) => {
     } catch (e) {}
 };
 
+// MAIN world 没有 chrome.runtime，需要在 ISOLATED world 中常驻一个桥接监听器，
+// 通过 window.postMessage 接收 MAIN world 抛出的日志，再转发到 background。
+const _injectLogBridge = (tabId, allFrames) => {
+    try {
+        chrome.scripting.executeScript({
+            target: { tabId, allFrames },
+            func: function () {
+                if (window.__fhMonkeyBridgeReady) return;
+                window.__fhMonkeyBridgeReady = true;
+                window.addEventListener('message', function (e) {
+                    if (!e || !e.data || e.data.__fh_monkey_log !== true) return;
+                    try {
+                        chrome.runtime.sendMessage({
+                            type: 'fh-dynamic-any-thing',
+                            thing: 'page-monkey-log',
+                            params: e.data.payload || {}
+                        });
+                    } catch (_) {}
+                }, false);
+            },
+            world: 'ISOLATED',
+            injectImmediately: true
+        }).catch(() => {});
+    } catch (_) {}
+};
+
 const _injectScript = (tabId, monkey) => {
     let allFrames = !!monkey.mAllFrames;
     let world = monkey.mWorld === 'ISOLATED' ? 'ISOLATED' : 'MAIN';
     let finalCode = buildFinalCode(monkey);
+
+    // 先确保 ISOLATED 桥接器在位（MAIN/ISOLATED 模式都需要：
+    // ISOLATED 模式下 user script 也通过 postMessage 走桥接，统一通道）
+    _injectLogBridge(tabId, allFrames);
 
     const exec = (worldOption, isFallback) => {
         try {
@@ -193,12 +285,12 @@ const _injectScript = (tabId, monkey) => {
                 target: { tabId, allFrames },
                 func: function (code) {
                     try { (0, eval)(code); } catch (e) {
+                        // 注入阶段的 eval 错误也走桥接
                         try {
-                            chrome.runtime && chrome.runtime.sendMessage && chrome.runtime.sendMessage({
-                                type: 'fh-dynamic-any-thing',
-                                thing: 'page-monkey-log',
-                                params: { level: 'error', msg: 'inject eval error: ' + (e && e.stack || e), time: Date.now() }
-                            });
+                            window.postMessage({
+                                __fh_monkey_log: true,
+                                payload: { level: 'error', msg: 'inject eval error: ' + ((e && e.stack) || e), time: Date.now() }
+                            }, '*');
                         } catch (_) {}
                     }
                 },
@@ -208,6 +300,13 @@ const _injectScript = (tabId, monkey) => {
             }).catch((err) => {
                 if (!isFallback && worldOption === 'MAIN') {
                     exec('ISOLATED', true);
+                } else {
+                    // 最终失败也回报一条日志
+                    log({
+                        id: monkey.id, name: monkey.mName || '', level: 'error',
+                        msg: 'inject failed: ' + ((err && err.message) || err),
+                        url: '(tab ' + tabId + ')', time: Date.now()
+                    });
                 }
             });
         } catch (e) {
