@@ -17,6 +17,9 @@ function initNavigation() {
     const navToggle = document.querySelector('.nav-toggle');
     const navMenu = document.querySelector('.nav-menu');
 
+    // 部分页面（例如隐私政策页）不渲染顶部导航，要做存在性守卫，避免脚本报错
+    if (!navbar) return;
+
     // Navbar scroll effect
     window.addEventListener('scroll', () => {
         if (window.scrollY > 50) {
